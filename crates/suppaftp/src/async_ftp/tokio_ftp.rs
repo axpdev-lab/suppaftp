@@ -294,6 +294,23 @@ where
         self.reader.get_ref().get_ref()
     }
 
+    /// Returns the reply bytes already read from the socket into the reader's
+    /// buffer but not yet consumed by any command.
+    ///
+    /// A server that sends a preliminary `1xx` and the final reply in one
+    /// segment has both pulled into this buffer by the read that collected the
+    /// first one, and the bare socket underneath shows nothing. A watcher
+    /// peeking the socket (MSG_PEEK) is blind to a refusal already sitting
+    /// here; this exposes exactly those bytes so the watch can look at the
+    /// right layer. Under TLS the buffer holds plaintext, so the reply class
+    /// stays readable here even when the wire bytes are not.
+    ///
+    /// The bytes are NOT consumed: the next command still reads them as its
+    /// reply.
+    pub fn buffered_reply_bytes(&self) -> &[u8] {
+        self.reader.buffer()
+    }
+
     /// Log in to the FTP server.
     pub async fn login<S: AsRef<str>>(&mut self, user: S, password: S) -> FtpResult<()> {
         debug!("Signin in with user '{}'", user.as_ref());
