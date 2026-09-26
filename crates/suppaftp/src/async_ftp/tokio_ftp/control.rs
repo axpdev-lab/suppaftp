@@ -304,6 +304,24 @@ where
     pub(super) fn new(guard: MutexGuard<'a, ControlChannel<T>>) -> Self {
         Self { guard }
     }
+
+    /// Returns the reply bytes already read from the control socket into the reader's buffer
+    /// but not yet consumed by any command.
+    ///
+    /// A server that sends a preliminary `1xx` and the final reply in one segment has both
+    /// pulled into this buffer by the read that collected the first one, and the socket
+    /// underneath shows nothing. A caller watching the control socket while a transfer runs
+    /// (for instance with `MSG_PEEK`) is blind to a refusal already sitting here; this exposes
+    /// exactly those bytes, so the watch can look at the right layer. Under TLS the buffer holds
+    /// plaintext, so the reply stays readable here even when the wire bytes are not.
+    ///
+    /// The bytes are not consumed: the next command still reads them as its reply. The slice
+    /// borrows this [`ControlSocket`], so it keeps the control connection locked: copy what is
+    /// needed and drop the socket before finishing a [`super::TransferStream`] or sending
+    /// another command.
+    pub fn buffered_reply_bytes(&self) -> &[u8] {
+        self.guard.reader.buffer()
+    }
 }
 
 impl<T> Deref for ControlSocket<'_, T>
@@ -314,6 +332,59 @@ where
 
     fn deref(&self) -> &Self::Target {
         self.guard.socket()
+    }
+}
+
+#[cfg(test)]
+mod buffered_reply_tests {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    use crate::tokio::AsyncFtpStream;
+
+    /// The welcome and a second reply arrive in one segment: the read that collects the
+    /// welcome pulls both into the reader, and the second one is visible there, unconsumed,
+    /// while the socket underneath has nothing left to read.
+    #[tokio::test]
+    async fn a_reply_pulled_with_the_previous_one_is_visible_and_not_consumed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket
+                .write_all(b"220 ready\r\n550 refused\r\n")
+                .await
+                .unwrap();
+            socket
+        });
+
+        let stream = AsyncFtpStream::connect(addr).await.unwrap();
+        let _server_socket = server.await.unwrap();
+        assert_eq!(
+            stream.get_ref().await.buffered_reply_bytes(),
+            b"550 refused\r\n"
+        );
+        // Reading it did not consume it.
+        assert_eq!(
+            stream.get_ref().await.buffered_reply_bytes(),
+            b"550 refused\r\n"
+        );
+    }
+
+    /// Nothing buffered beyond the reply a command consumed: the slice is empty.
+    #[tokio::test]
+    async fn nothing_is_buffered_after_a_lone_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(b"220 ready\r\n").await.unwrap();
+            socket
+        });
+
+        let stream = AsyncFtpStream::connect(addr).await.unwrap();
+        let _server_socket = server.await.unwrap();
+        assert!(stream.get_ref().await.buffered_reply_bytes().is_empty());
     }
 }
 
