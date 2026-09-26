@@ -319,6 +319,9 @@ where
     /// borrows this [`ControlSocket`], so it keeps the control connection locked: copy what is
     /// needed and drop the socket before finishing a [`super::TransferStream`] or sending
     /// another command.
+    ///
+    /// Bytes a cancelled reply read already moved out of the reader into its partial line are
+    /// not included: they are no longer buffered here, and the next read resumes from them.
     pub fn buffered_reply_bytes(&self) -> &[u8] {
         self.guard.reader.buffer()
     }
